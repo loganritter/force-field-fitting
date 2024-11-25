@@ -1,30 +1,66 @@
 import numpy as np
 import os
 from scipy.spatial.transform import Rotation as R
+from math import pi, cos, sin, sqrt
+
+class PBC:
+    def __init__(self, a, b, c, alpha, beta, gamma):
+        self.a = a
+        self.b = b
+        self.c = c
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+
+        basis00 = a
+        basis01 = 0.0
+        basis02 = 0.0
+        basis10 = b * cos(pi / 180.0 * gamma)
+        basis11 = b * sin(pi / 180.0 * gamma)
+        basis12 = 0.0
+        basis20 = c * cos(pi / 180.0 * beta)
+        basis21 = ((b * c * cos(pi / 180.0 * alpha)) - (basis10 * basis20)) / basis11
+        basis22 = sqrt(c * c - basis20 * basis20 - basis21 * basis21)
+
+        self.basis_matrix = np.array([
+            [basis00, basis01, basis02],
+            [basis10, basis11, basis12],
+            [basis20, basis21, basis22],
+        ])
+
+        self.volume = basis00 * (basis11 * basis22 - basis12 * basis21)
+        self.volume += basis01 * (basis12 * basis20 - basis10 * basis22)
+        self.volume += basis02 * (basis10 * basis21 - basis11 * basis20)
+
+        self.inverse_volume = 1.0 / self.volume
+
+        reciprocal_basis00 = self.inverse_volume * (basis11 * basis22 - basis12 * basis21)
+        reciprocal_basis01 = self.inverse_volume * (basis02 * basis21 - basis01 * basis22)
+        reciprocal_basis02 = self.inverse_volume * (basis01 * basis12 - basis02 * basis11)
+        reciprocal_basis10 = self.inverse_volume * (basis12 * basis20 - basis10 * basis22)
+        reciprocal_basis11 = self.inverse_volume * (basis00 * basis22 - basis02 * basis20)
+        reciprocal_basis12 = self.inverse_volume * (basis02 * basis10 - basis00 * basis12)
+        reciprocal_basis20 = self.inverse_volume * (basis10 * basis21 - basis11 * basis20)
+        reciprocal_basis21 = self.inverse_volume * (basis01 * basis20 - basis00 * basis21)
+        reciprocal_basis22 = self.inverse_volume * (basis00 * basis11 - basis01 * basis10)
+
+        self.reciprocal_basis_matrix = np.array([
+            [reciprocal_basis00, reciprocal_basis01, reciprocal_basis02],
+            [reciprocal_basis10, reciprocal_basis11, reciprocal_basis12],
+            [reciprocal_basis20, reciprocal_basis21, reciprocal_basis22],
+        ])
+
+    def wrap(self, dx):
+        img = np.matmul(dx, self.reciprocal_basis_matrix)
+        img = np.round(img)
+        di = np.matmul(img, self.basis_matrix)
+        dx_return = dx - di
+        return dx_return
 
 class PHASTFitConfigurations:
-    """
-    Creates input files for MOFs that generate configurations of gases
-    near metal centers or randomly in pores. Supports fragments or periodic systems.
-    
-    Used in conjunction with FFit.
-    """
     def __init__(self, input_file, charges_file, gas_list, target_metal_index,
                  start_distance, step, num_steps, axis='y', force_field_type='H2CNO'):
-        """
-        Initialize the processor with configuration parameters.
-        
-        Args:
-            input_file (str): Path to XYZ coordinate file
-            charges_file (str): Path to atomic charges file
-            gas_list (list): List of gases to process
-            target_metal_index (int): Index of the target metal atom
-            start_distance (float): Initial distance for gas placement
-            step (float): Distance increment between configurations
-            num_steps (int): Number of configurations to generate
-            axis (str): Axis for gas placement (1D, 2D, or 3D movement)
-            force_field_type (str): Type of force field ('H2CNO' or 'AA')
-        """
+
         self.input_file = input_file
         self.charges_file = charges_file
         self.gas_list = gas_list
@@ -33,6 +69,7 @@ class PHASTFitConfigurations:
         self.step = step
         self.num_steps = num_steps
         self.force_field_type = force_field_type
+        self.pbc = None
         
         # UFF radii
         self.vdw_radii = {
@@ -49,6 +86,9 @@ class PHASTFitConfigurations:
             'Md': 2.916802403, 'No': 2.893639037, 'Lr': 2.882948252
         }
         
+        if force_field_type not in ['H2CNO', 'AA']:
+            raise ValueError("force_field_type must be either 'H2CNO' or 'AA'")
+        
         self.axis_map = {
             'x': [0], 'y': [1], 'z': [2],
             'xy': [0, 1], 'xz': [0, 2], 'yz': [1, 2],
@@ -59,13 +99,6 @@ class PHASTFitConfigurations:
         self.axes = self.axis_map[axis]
 
     def read_xyz(self):
-        """
-        Read atomic coordinates and cell information from XYZ file.
-        
-        Returns:
-            tuple: (atoms, cell_info, cell_dims) where atoms is list of (atom, position) tuples,
-                  cell_info is string, and cell_dims is list of cell dimensions or None
-        """
         with open(self.input_file, 'r') as file:
             lines = file.readlines()
         num_atoms = int(lines[0].strip())
@@ -77,204 +110,173 @@ class PHASTFitConfigurations:
             position = np.array(list(map(float, parts[1:])))
             atoms.append((atom, position))
         
-        cell_dims = None
         if cell_info:
             try:
-                cell_dims = list(map(float, cell_info.split()))
-                if len(cell_dims) != 6:
-                    cell_dims = None
+                cell_params = list(map(float, cell_info.split()))
+                if len(cell_params) == 6:
+                    a, b, c = cell_params[:3]
+                    alpha, beta, gamma = cell_params[3:]
+                    self.pbc = PBC(a, b, c, alpha, beta, gamma)
+                    return atoms, cell_info, self.pbc.basis_matrix
             except ValueError:
-                cell_dims = None
-        return atoms, cell_info, cell_dims
+                pass
+        return atoms, cell_info, None
 
     def read_charges(self):
-        """
-        Read atomic charges from file.
-        
-        Returns:
-            list: List of atomic charges as floats
-        """
         with open(self.charges_file, 'r') as file:
             return [float(line.strip()) for line in file]
 
-    @staticmethod
-    def apply_pbc(position, box_dims):
-        """
-        Apply periodic boundary conditions to atomic positions.
-        
-        Args:
-            position (np.ndarray): Atomic position
-            box_dims (list): Box dimensions
-            
-        Returns:
-            np.ndarray: Position after PBC application
-        """
-        if box_dims is not None:
-            for i in range(3):
-                position[i] %= box_dims[i]
+    def apply_pbc(self, position, cell_matrix):
+        if cell_matrix is not None and self.pbc is not None:
+            return self.pbc.wrap(position)
         return position
 
-    def transform_fragment(self, atoms, cell_dims=None):
-        """
-        Transform molecular fragment, optionally with PBC.
-        
-        Args:
-            atoms (list): List of (atom, position) tuples
-            cell_dims (list): Optional cell dimensions for PBC
-            
-        Returns:
-            list: Transformed atomic positions
-        """
+    def transform_fragment(self, atoms, cell_matrix=None):
         target_position = atoms[self.target_metal_index][1]
-        if cell_dims:
-            box_center = np.array(cell_dims[:3]) / 2
+        if cell_matrix is not None:
+            box_center = np.array([0.5, 0.5, 0.5])
+            box_center_cart = np.dot(box_center, cell_matrix)
+            
             translation_vector = np.zeros(3)
             for ax in self.axes:
-                translation_vector[ax] = target_position[ax] - box_center[ax]
-            return [(atom, self.apply_pbc(position - translation_vector, cell_dims[:3]))
+                translation_vector[ax] = target_position[ax] - box_center_cart[ax]
+            
+            return [(atom, self.apply_pbc(position - translation_vector, cell_matrix))
                     for atom, position in atoms]
         else:
             translation_vector = np.zeros(3)
             for ax in self.axes:
                 translation_vector[ax] = target_position[ax]
             return [(atom, position - translation_vector) for atom, position in atoms]
-
-    def add_noble_gas(self, atoms, target_position, noble_gas, cell_dims):
-        """
-        Generate configurations with noble gas at different distances.
-        
-        Args:
-            atoms (list): List of (atom, position) tuples
-            target_position (np.ndarray): Position of target metal atom
-            noble_gas (str): Noble gas element symbol
-            cell_dims (list): Optional cell dimensions for PBC
             
-        Returns:
-            list: List of configurations with noble gas at different distances
-        """
+    def get_pore_bounds(self, atoms, cell_matrix):
+        if cell_matrix is not None and self.pbc is not None:
+            min_bounds = np.zeros(3)
+            max_bounds = np.ones(3)
+            return (
+                np.dot(min_bounds, self.pbc.basis_matrix),
+                np.dot(max_bounds, self.pbc.basis_matrix)
+            )
+        else:
+            positions = np.array([pos for _, pos in atoms])
+            return np.min(positions, axis=0), np.max(positions, axis=0)
+
+    def add_noble_gas(self, atoms, target_position, noble_gas, cell_matrix):
         configurations = []
-        for i in range(self.num_steps):
-            distance = self.start_distance + i * self.step
-            position = target_position.copy()
-            for ax in self.axes:
-                position[ax] -= distance  # Move along all specified axes
-            if cell_dims is not None:
-                position = self.apply_pbc(position, cell_dims[:3])
-            configurations.append(atoms + [(noble_gas, position)])
+        
+        if self.force_field_type == 'H2CNO':
+            for i in range(self.num_steps):
+                distance = self.start_distance + i * self.step
+                position = target_position.copy()
+                for ax in self.axes:
+                    position[ax] -= distance
+                if cell_matrix is not None:
+                    position = self.apply_pbc(position, cell_matrix)
+                configurations.append(atoms + [(noble_gas, position)])
+        else:
+            for _ in range(self.num_steps):
+                position = self.generate_random_position(atoms, cell_matrix)
+                if cell_matrix is not None:
+                    position = self.apply_pbc(position, cell_matrix)
+                configurations.append(atoms + [(noble_gas, position)])
+        
         return configurations
         
-    def add_dimer(self, atoms, target_position, cell_dims, dimer_type="H2", num_rotations=10):
-        """
-        Generate configurations with a dimer gas (H2, N2, etc.) at different distances, with random rotations.
-        
-        Args:
-            atoms (list): List of (atom, position) tuples.
-            target_position (np.ndarray): Position of the target metal atom.
-            cell_dims (list): Optional cell dimensions for PBC.
-            dimer_type (str): Type of dimer gas ("H2" or "N2").
-            num_rotations (int): Number of random rotations per step.
-        
-        Returns:
-            list: List of configurations with the dimer gas at different distances and rotations.
-        """
+    def add_dimer(self, atoms, target_position, cell_matrix, dimer_type="H2", num_rotations=10):
         if dimer_type == "H2":
             dimer_atoms = ["H2DA", "H2H", "H2H"]
-            dimer_positions = [
-                (0.000, 0.000, 0.000),  # H2DA center of mass
-                (0.371, 0.000, 0.000),  # H2H position 1
-                (-0.371, 0.000, 0.000)  # H2H position 2
+            bond_length = 0.742
+            base_positions = [
+                (0.000, 0.000, 0.000),
+                (0.371, 0.000, 0.000),
+                (-0.371, 0.000, 0.000)
             ]
         elif dimer_type == "N2":
             dimer_atoms = ["N2DA", "N2N", "N2N"]
-            dimer_positions = [
-                (0.000, 0.000, 0.000),  # N2DA center of mass
-                (0.5507, 0.000, 0.000),  # N2N position 1
-                (-0.5507, 0.000, 0.000)  # N2N position 2
+            bond_length = 1.1014
+            base_positions = [
+                (0.000, 0.000, 0.000),
+                (0.5507, 0.000, 0.000),
+                (-0.5507, 0.000, 0.000)
             ]
         else:
             raise ValueError(f"Unsupported dimer type: {dimer_type}")
 
-        dimer_positions = [np.array(pos) for pos in dimer_positions]
-
+        base_positions = [np.array(pos) for pos in base_positions]
         configurations = []
+        
+        if self.force_field_type == 'H2CNO':
+            for i in range(self.num_steps):
+                distance = self.start_distance + i * self.step
+                dimer_center = target_position.copy()
+                for ax in self.axes:
+                    dimer_center[ax] -= distance
 
-        # Generate configurations at each distance step
-        for i in range(self.num_steps):
-            distance = self.start_distance + i * self.step
-            dimer_center_position = target_position.copy()
-            dimer_center_position[self.axes] -= distance  # Move dimer center along the specified axis
+                if cell_matrix is not None:
+                    dimer_center = self.apply_pbc(dimer_center, cell_matrix)
 
-            # Apply PBC to dimer center if applicable
-            if cell_dims is not None:
-                dimer_center_position = self.apply_pbc(dimer_center_position, cell_dims[:3])
+                base_dimer = [
+                    (dimer_atoms[j], dimer_center + base_positions[j])
+                    for j in range(len(dimer_atoms))
+                ]
 
-            # Create the base configuration for the dimer at each distance
-            base_dimer_positions = [
-                (dimer_atoms[j], dimer_center_position + dimer_positions[j])
-                for j in range(len(dimer_atoms))
-            ]
-
-            # Apply random rotations to the dimer
-            for _ in range(num_rotations):
-                rotated_dimer_positions = self.random_rotate_molecule(base_dimer_positions)
-                configurations.append(atoms + rotated_dimer_positions)
-
+                for _ in range(num_rotations):
+                    rotated_dimer = self.random_rotate_molecule(base_dimer)
+                    if cell_matrix is not None:
+                        rotated_dimer = [(atom, self.apply_pbc(pos, cell_matrix)) 
+                                       for atom, pos in rotated_dimer]
+                    configurations.append(atoms + rotated_dimer)
+        
+        else: 
+            rotations_per_position = 5
+            
+            for _ in range(self.num_steps):
+                center_position = self.generate_random_position(atoms, cell_matrix)
+                
+                base_dimer = [
+                    (dimer_atoms[0], center_position),
+                    (dimer_atoms[1], center_position + np.array([bond_length/2, 0, 0])),
+                    (dimer_atoms[2], center_position + np.array([-bond_length/2, 0, 0]))
+                ]
+                
+                for _ in range(rotations_per_position):
+                    rotated_dimer = self.random_rotate_molecule(base_dimer)
+                    if cell_matrix is not None:
+                        rotated_dimer = [(atom, self.apply_pbc(pos, cell_matrix)) 
+                                       for atom, pos in rotated_dimer]
+                    configurations.append(atoms + rotated_dimer)
+        
         return configurations
         
+    def generate_random_position(self, atoms, cell_matrix):
+        if cell_matrix is not None and self.pbc is not None:
+            max_attempts = 1000
+            for _ in range(max_attempts):
+                frac_pos = np.random.uniform(0, 1, 3)
+                cart_pos = np.dot(frac_pos, self.pbc.basis_matrix)
+                if self.check_vdw_distance(cart_pos, atoms):
+                    return cart_pos
+        else:
+            min_bounds, max_bounds = self.get_pore_bounds(atoms, None)
+            max_attempts = 1000
+            for _ in range(max_attempts):
+                position = np.random.uniform(min_bounds, max_bounds)
+                if self.check_vdw_distance(position, atoms):
+                    return position
+
+        raise RuntimeError("Could not find valid position after maximum attempts")
+        
     def random_rotate_molecule(self, dimer):
-        """
-        Apply a random rotation to a dimer molecule around its center of mass.
-        
-        Args:
-            dimer (list): List of (atom, position) tuples for dimers
-        
-        Returns:
-            list: List of rotated (atom, position) tuples for dimers
-        """
-        # Extract center of mass and shift positions to it
         com = dimer[0][1]
         rel_positions = [(atom, pos - com) for atom, pos in dimer]
         
-        # Generate a random rotation and apply it
         quaternion = R.random().as_quat()
         rotation = R.from_quat(quaternion)
         
         rotated_positions = [(atom, rotation.apply(pos) + com) for atom, pos in rel_positions]
         return rotated_positions
         
-    def get_pore_bounds(self, atoms, cell_dims):
-        """
-        Calculate the boundaries of the pore space.
-        
-        Args:
-            atoms (list): List of (atom, position) tuples
-            cell_dims (list): Cell dimensions for PBC
-            
-        Returns:
-            tuple: (min_bounds, max_bounds) for the pore space
-        """
-        if cell_dims is not None:
-            min_bounds = np.zeros(3)
-            max_bounds = np.array(cell_dims[:3])
-        else:
-            positions = np.array([pos for _, pos in atoms])
-            min_bounds = np.min(positions, axis=0)
-            max_bounds = np.max(positions, axis=0)
-        return min_bounds, max_bounds
-        
     def check_vdw_distance(self, position, atoms, min_factor=0.75, max_factor=1.5):
-        """
-        Check if a position satisfies van der Waals distance criteria.
-        
-        Args:
-            position (np.ndarray): Position to check
-            atoms (list): List of (atom, position) tuples
-            min_factor (float): Minimum factor of sum of vdW radii
-            max_factor (float): Maximum factor of sum of vdW radii
-            
-        Returns:
-            bool: True if position satisfies vdW criteria
-        """
         for atom_name, atom_pos in atoms:
             distance = np.linalg.norm(position - atom_pos)
             vdw_sum = self.vdw_radii.get(atom_name, 3.0)  # Default to 3.0 if unknown
@@ -284,121 +286,31 @@ class PHASTFitConfigurations:
                 return False
         return True
         
-    def generate_random_position(self, atoms, cell_dims):
-        """
-        Generate a random position within the pore that satisfies vdW criteria.
-        
-        Args:
-            atoms (list): List of (atom, position) tuples
-            cell_dims (list): Cell dimensions for PBC
-            
-        Returns:
-            np.ndarray: Valid random position
-        """
-        min_bounds, max_bounds = self.get_pore_bounds(atoms, cell_dims)
-        max_attempts = 1000
-        
-        for _ in range(max_attempts):
-            position = np.random.uniform(min_bounds, max_bounds)
-            if self.check_vdw_distance(position, atoms):
-                return position
-                
-        raise RuntimeError("Could not find valid position after maximum attempts")
-
-    def add_noble_gas_aa(self, atoms, noble_gas, cell_dims):
-        """
-        Generate configurations with noble gas at random positions satisfying vdW criteria.
-        
-        Args:
-            atoms (list): List of (atom, position) tuples
-            noble_gas (str): Noble gas element symbol
-            cell_dims (list): Optional cell dimensions for PBC
-            
-        Returns:
-            list: List of configurations with noble gas at different positions
-        """
-        configurations = []
-        for _ in range(self.num_steps):
-            position = self.generate_random_position(atoms, cell_dims)
-            if cell_dims is not None:
-                position = self.apply_pbc(position, cell_dims[:3])
-            configurations.append(atoms + [(noble_gas, position)])
-        return configurations
-
-    def add_dimer_aa(self, atoms, cell_dims, dimer_type="H2"):
-        """
-        Generate configurations with a dimer gas at random positions with random orientations.
-        
-        Args:
-            atoms (list): List of (atom, position) tuples
-            cell_dims (list): Optional cell dimensions for PBC
-            dimer_type (str): Type of dimer gas ("H2" or "N2")
-            
-        Returns:
-            list: List of configurations
-        """
-        if dimer_type == "H2":
-            dimer_atoms = ["H2DA", "H2H", "H2H"]
-            bond_length = 0.742     # H2 bond length
-        elif dimer_type == "N2":
-            dimer_atoms = ["N2DA", "N2N", "N2N"]
-            bond_length = 1.1014    # N2 bond length
-        else:
-            raise ValueError(f"Unsupported dimer type: {dimer_type}")
-
-        configurations = []
-        for _ in range(self.num_steps):
-            center_position = self.generate_random_position(atoms, cell_dims)
-            
-            # Base dimer positions
-            base_positions = [
-                (dimer_atoms[0], center_position),
-                (dimer_atoms[1], center_position + np.array([bond_length/2, 0, 0])),
-                (dimer_atoms[2], center_position + np.array([-bond_length/2, 0, 0]))
-            ]
-            
-            # Generate 5 random orientations for each position
-            for _ in range(5):
-                rotated_positions = self.random_rotate_molecule(base_positions)
-                if cell_dims is not None:
-                    rotated_positions = [(atom, self.apply_pbc(pos, cell_dims[:3])) 
-                                       for atom, pos in rotated_positions]
-                configurations.append(atoms + rotated_positions)
-        
-        return configurations
-        
     @staticmethod
     def write_files(file, atoms, comment, cell_info=None, charges=None, omit_cm=False):
-        """
-        Write molecular configurations.
-        
-        Args:
-            file: File object to write to
-            atoms (list): List of (atom, position) tuples
-            comment (str): Comment line for XYZ file
-            cell_info (str): Optional cell information
-            charges (list): Optional atomic charges
-            omit_cm (bool): Omits writing H2DA/N2DA in input.xyz
-        """
         gas_charges = {
             "H2DA": -0.846166, "H2H": 0.423083,
             "N2DA": 0.94194, "N2N": -0.47103,
             "He": 0.0, "Ne": 0.0, "Ar": 0.0, "Kr": 0.0, "Xe": 0.0, "Rn": 0.0
         }
         
-        atom_count = len(atoms) - (2 if omit_cm else 0)
+        atoms_to_write = [atom for atom in atoms if not (omit_cm and atom[0] in ["H2DA", "N2DA"])]
+        atom_count = len(atoms_to_write)
+        
         file.write(f"{atom_count}\n")
         file.write(f"{comment} {cell_info}\n" if cell_info else f"{comment}\n")
         
         charge_index = 0
+        original_atom_count = sum(1 for atom in atoms if atom[0] not in ["H2DA", "N2DA", "H2H", "N2N", "He", "Ne", "Ar", "Kr", "Xe", "Rn"])
         
-        for atom, position in atoms:
-            if omit_cm and atom in ["H2DA", "N2DA"]:
-                continue
+        for idx, (atom, position) in enumerate(atoms_to_write, 1):
             atom_name = atom
             if omit_cm and atom in ["H2H", "N2N"]:
                 atom_name = "H" if atom == "H2H" else "N"
+            
             position_str = ' '.join(f"{coord:.5f}" for coord in position)
+            
+            type_column = 1 if idx <= original_atom_count else 2
             
             if charges:
                 if atom in gas_charges:
@@ -406,66 +318,62 @@ class PHASTFitConfigurations:
                 else:
                     charge = charges[charge_index]
                     charge_index += 1
-                line = f"{atom_name} {position_str} {charge:.5f}"
+                line = f"{atom_name} {type_column} {position_str} {charge:.5f}"
             else:
-                line = f"{atom_name} {position_str}"
+                line = f"{atom_name} {type_column} {position_str}"
 
             file.write(line + "\n")
 
     def process(self):
-        """
-        Main processing method to generate all configurations and write output files.
-        """
-        atoms, cell_info, cell_dims = self.read_xyz()
+        atoms, cell_info, cell_matrix = self.read_xyz()
         charges = self.read_charges()
         
-        atoms = self.transform_fragment(atoms, cell_dims)
+        if cell_matrix is not None:
+            atoms = [(atom, self.apply_pbc(position, cell_matrix)) for atom, position in atoms]
+        
+        atoms = self.transform_fragment(atoms, cell_matrix)
         target_position = atoms[self.target_metal_index][1]
 
         for gas in self.gas_list:
-            if self.force_field_type == 'H2CNO':
-                if gas in ['H2', 'N2']:
-                    configurations = self.add_dimer(atoms, target_position, cell_dims, dimer_type=gas, num_rotations=10)
-                else:
-                    configurations = self.add_noble_gas(atoms, target_position, gas, cell_dims)
-            else:  # AA force field type
-                if gas in ['H2', 'N2']:
-                    configurations = self.add_dimer_aa(atoms, cell_dims, dimer_type=gas)
-                else:
-                    configurations = self.add_noble_gas_aa(atoms, gas, cell_dims)
+            if gas in ['H2', 'N2']:
+                configurations = self.add_dimer(atoms, target_position, cell_matrix, dimer_type=gas)
+            else:
+                configurations = self.add_noble_gas(atoms, target_position, gas, cell_matrix)
             
-            # Create folder structure and write files
             os.makedirs(gas, exist_ok=True)
             
-            # Write configs.fit
             with open(os.path.join(gas, "configs.fit"), 'w') as configs_file:
                 for config in configurations:
+                    if cell_matrix is not None:
+                        config = [(atom, self.apply_pbc(pos, cell_matrix)) for atom, pos in config]
                     self.write_files(configs_file, config, "XXX", cell_info, charges)
             
-            # Write out.xyz
             with open(os.path.join(gas, "out.xyz"), 'w') as out_file:
                 for config in configurations:
+                    if cell_matrix is not None:
+                        config = [(atom, self.apply_pbc(pos, cell_matrix)) for atom, pos in config]
                     self.write_files(out_file, config, cell_info)
             
-            # Write individual configuration files in subfolders
             for idx, config in enumerate(configurations, start=1):
                 subfolder = os.path.join(gas, str(idx))
                 os.makedirs(subfolder, exist_ok=True)
                 with open(os.path.join(subfolder, "input.xyz"), 'w') as input_file:
+                    if cell_matrix is not None:
+                        config = [(atom, self.apply_pbc(pos, cell_matrix)) for atom, pos in config]
                     self.write_files(input_file, config, cell_info, omit_cm=True)
 
         print(f"Configuration generation complete using the {self.force_field_type} force field type.")
 
 if __name__ == "__main__":
     processor = PHASTFitConfigurations(
-        input_file="Cu-MOF-74.xyz",
-        charges_file="Cu74_charges.txt",
+        input_file="T3T-opt.xyz",
+        charges_file="charges.txt",
         gas_list=["Ne", "Ar", "Kr", "Xe", "H2", "N2"],
-        target_metal_index=78,
+        target_metal_index=72,
         start_distance=3.0,
         step=0.1,
-        num_steps=501,
+        num_steps=51,
         axis='x',
-        force_field_type='AA'  # Can be 'H2CNO' or 'AA'
+        force_field_type='H2CNO'  # Can be 'H2CNO' or 'AA'
     )
     processor.process()
