@@ -1,7 +1,4 @@
-Creates configurations of noble gases with H2 and N2 dimers for force field parameterization. Two force field types available for fitting:
+Various scripts used to fit parmeters for the PHAST 2.0 force field.
 
-H2CNO: places a previously mentioned gas on a target atomic index and increments the distance in a straight line
-
-AA: places a previously mentioned gas randomly around the molecular structure within 0.75-1.5 times the vdW radii of the structure
-
-Written specifically for MOFs, but will work with other structures as well.
+Publications:
+Logan Ritter, Brant Tudor, Adam Hogan, Tony Pham, and Brian Space. Journal of Chemical Theory and Computation. 2024 20 (13), 5570-5582. DOI: 10.1021/acs.jctc.4c00226
