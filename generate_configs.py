@@ -215,11 +215,13 @@ class PHASTFitConfigurations:
                 if cell_matrix is not None:
                     dimer_center = self.apply_pbc(dimer_center, cell_matrix)
 
+                # Create base configuration
                 base_dimer = [
                     (dimer_atoms[j], dimer_center + base_positions[j])
                     for j in range(len(dimer_atoms))
                 ]
 
+                # Apply random rotations
                 for _ in range(num_rotations):
                     rotated_dimer = self.random_rotate_molecule(base_dimer)
                     if cell_matrix is not None:
@@ -233,12 +235,14 @@ class PHASTFitConfigurations:
             for _ in range(self.num_steps):
                 center_position = self.generate_random_position(atoms, cell_matrix)
                 
+                # Create base configuration at random position
                 base_dimer = [
                     (dimer_atoms[0], center_position),
                     (dimer_atoms[1], center_position + np.array([bond_length/2, 0, 0])),
                     (dimer_atoms[2], center_position + np.array([-bond_length/2, 0, 0]))
                 ]
                 
+                # Generate multiple orientations for each position
                 for _ in range(rotations_per_position):
                     rotated_dimer = self.random_rotate_molecule(base_dimer)
                     if cell_matrix is not None:
@@ -270,6 +274,7 @@ class PHASTFitConfigurations:
         com = dimer[0][1]
         rel_positions = [(atom, pos - com) for atom, pos in dimer]
         
+        # Generate a random rotation and apply it
         quaternion = R.random().as_quat()
         rotation = R.from_quat(quaternion)
         
@@ -287,30 +292,27 @@ class PHASTFitConfigurations:
         return True
         
     @staticmethod
-    def write_files(file, atoms, comment, cell_info=None, charges=None, omit_cm=False):
+    def write_files(file, atoms, comment, cell_info=None, charges=None, omit_cm=False, is_configs_fit=False):
         gas_charges = {
             "H2DA": -0.846166, "H2H": 0.423083,
             "N2DA": 0.94194, "N2N": -0.47103,
             "He": 0.0, "Ne": 0.0, "Ar": 0.0, "Kr": 0.0, "Xe": 0.0, "Rn": 0.0
         }
         
-        atoms_to_write = [atom for atom in atoms if not (omit_cm and atom[0] in ["H2DA", "N2DA"])]
-        atom_count = len(atoms_to_write)
-        
+        atom_count = sum(1 for atom, _ in atoms if not (omit_cm and atom == "H2DA") and not (omit_cm and atom == "N2DA"))
         file.write(f"{atom_count}\n")
         file.write(f"{comment} {cell_info}\n" if cell_info else f"{comment}\n")
         
         charge_index = 0
-        original_atom_count = sum(1 for atom in atoms if atom[0] not in ["H2DA", "N2DA", "H2H", "N2N", "He", "Ne", "Ar", "Kr", "Xe", "Rn"])
+        gas_atoms = {"He", "Ne", "Ar", "Kr", "Xe", "Rn", "H2H", "N2N"}
         
-        for idx, (atom, position) in enumerate(atoms_to_write, 1):
+        for atom, position in atoms:
+            if omit_cm and atom in ["H2DA", "N2DA"]:
+                continue
             atom_name = atom
             if omit_cm and atom in ["H2H", "N2N"]:
                 atom_name = "H" if atom == "H2H" else "N"
-            
             position_str = ' '.join(f"{coord:.5f}" for coord in position)
-            
-            type_column = 1 if idx <= original_atom_count else 2
             
             if charges:
                 if atom in gas_charges:
@@ -318,9 +320,19 @@ class PHASTFitConfigurations:
                 else:
                     charge = charges[charge_index]
                     charge_index += 1
-                line = f"{atom_name} {type_column} {position_str} {charge:.5f}"
+                
+                if is_configs_fit:
+                    # For configs.fit, add number 1 for structure atoms and 2 for fitting atoms
+                    number = "2" if atom in gas_atoms else "1"
+                    line = f"{atom_name} {number} {position_str} {charge:.5f}"
+                else:
+                    line = f"{atom_name} {position_str} {charge:.5f}"
             else:
-                line = f"{atom_name} {type_column} {position_str}"
+                if is_configs_fit:
+                    number = "2" if atom in gas_atoms else "1"
+                    line = f"{atom_name} {number} {position_str}"
+                else:
+                    line = f"{atom_name} {position_str}"
 
             file.write(line + "\n")
 
@@ -328,6 +340,7 @@ class PHASTFitConfigurations:
         atoms, cell_info, cell_matrix = self.read_xyz()
         charges = self.read_charges()
         
+        # Ensure all initial atoms are within the cell
         if cell_matrix is not None:
             atoms = [(atom, self.apply_pbc(position, cell_matrix)) for atom, position in atoms]
         
@@ -340,14 +353,17 @@ class PHASTFitConfigurations:
             else:
                 configurations = self.add_noble_gas(atoms, target_position, gas, cell_matrix)
             
+            # Create folder structure and write files
             os.makedirs(gas, exist_ok=True)
             
+            # Write configs.fit
             with open(os.path.join(gas, "configs.fit"), 'w') as configs_file:
                 for config in configurations:
                     if cell_matrix is not None:
                         config = [(atom, self.apply_pbc(pos, cell_matrix)) for atom, pos in config]
-                    self.write_files(configs_file, config, "XXX", cell_info, charges)
+                    self.write_files(configs_file, config, "XXX", cell_info, charges, is_configs_fit=True)
             
+            # Write other files normally
             with open(os.path.join(gas, "out.xyz"), 'w') as out_file:
                 for config in configurations:
                     if cell_matrix is not None:
@@ -366,10 +382,10 @@ class PHASTFitConfigurations:
 
 if __name__ == "__main__":
     processor = PHASTFitConfigurations(
-        input_file="T3T-opt.xyz",
+        input_file="2x2x4.xyz",
         charges_file="charges.txt",
-        gas_list=["Ne", "Ar", "Kr", "Xe", "H2", "N2"],
-        target_metal_index=72,
+        gas_list=["Ne", "Ar", "Kr", "Xe", "H2"],
+        target_metal_index=290,
         start_distance=3.0,
         step=0.1,
         num_steps=51,
