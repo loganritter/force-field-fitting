@@ -186,63 +186,54 @@ class PHASTFitConfigurations:
         if dimer_type == "H2":
             dimer_atoms = ["H2DA", "H2H", "H2H"]
             bond_length = 0.742
-            base_positions = [
-                (0.000, 0.000, 0.000),
-                (0.371, 0.000, 0.000),
-                (-0.371, 0.000, 0.000)
-            ]
         elif dimer_type == "N2":
             dimer_atoms = ["N2DA", "N2N", "N2N"]
             bond_length = 1.1014
-            base_positions = [
-                (0.000, 0.000, 0.000),
-                (0.5507, 0.000, 0.000),
-                (-0.5507, 0.000, 0.000)
-            ]
         else:
             raise ValueError(f"Unsupported dimer type: {dimer_type}")
 
-        base_positions = [np.array(pos) for pos in base_positions]
         configurations = []
         
         if self.force_field_type == 'H2CNO':
             for i in range(self.num_steps):
                 distance = self.start_distance + i * self.step
-                dimer_center = target_position.copy()
+                
+                near_h_position = target_position.copy()
                 for ax in self.axes:
-                    dimer_center[ax] -= distance
-
-                if cell_matrix is not None:
-                    dimer_center = self.apply_pbc(dimer_center, cell_matrix)
-
-                # Create base configuration
-                base_dimer = [
-                    (dimer_atoms[j], dimer_center + base_positions[j])
-                    for j in range(len(dimer_atoms))
+                    near_h_position[ax] -= distance
+                
+                axis_direction = np.zeros(3)
+                for ax in self.axes:
+                    axis_direction[ax] = 1.0
+                axis_direction = axis_direction / np.linalg.norm(axis_direction)
+                
+                cm_position = near_h_position + (bond_length/2) * axis_direction
+                far_h_position = near_h_position + bond_length * axis_direction
+                
+                dimer = [
+                    (dimer_atoms[0], cm_position),
+                    (dimer_atoms[1], near_h_position),
+                    (dimer_atoms[2], far_h_position)
                 ]
-
-                # Apply random rotations
-                for _ in range(num_rotations):
-                    rotated_dimer = self.random_rotate_molecule(base_dimer)
-                    if cell_matrix is not None:
-                        rotated_dimer = [(atom, self.apply_pbc(pos, cell_matrix)) 
-                                       for atom, pos in rotated_dimer]
-                    configurations.append(atoms + rotated_dimer)
+                
+                if cell_matrix is not None:
+                    dimer = [(atom, self.apply_pbc(pos, cell_matrix)) 
+                            for atom, pos in dimer]
+                
+                configurations.append(atoms + dimer)
         
-        else: 
+        else:
             rotations_per_position = 5
             
             for _ in range(self.num_steps):
                 center_position = self.generate_random_position(atoms, cell_matrix)
                 
-                # Create base configuration at random position
                 base_dimer = [
                     (dimer_atoms[0], center_position),
                     (dimer_atoms[1], center_position + np.array([bond_length/2, 0, 0])),
                     (dimer_atoms[2], center_position + np.array([-bond_length/2, 0, 0]))
                 ]
                 
-                # Generate multiple orientations for each position
                 for _ in range(rotations_per_position):
                     rotated_dimer = self.random_rotate_molecule(base_dimer)
                     if cell_matrix is not None:
@@ -382,13 +373,13 @@ class PHASTFitConfigurations:
 
 if __name__ == "__main__":
     processor = PHASTFitConfigurations(
-        input_file="2x2x4.xyz",
+        input_file="temp.xyz",
         charges_file="charges.txt",
-        gas_list=["Ne", "Ar", "Kr", "Xe", "H2"],
-        target_metal_index=290,
-        start_distance=3.0,
+        gas_list=["H2"],
+        target_metal_index=44,
+        start_distance=2.0,
         step=0.1,
-        num_steps=51,
+        num_steps=61,
         axis='x',
         force_field_type='H2CNO'  # Can be 'H2CNO' or 'AA'
     )
